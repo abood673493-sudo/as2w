@@ -1,0 +1,85 @@
+# SSH Manager Panel - Docker Compose stack
+#
+# Scope: this file deploys the *control plane* (PostgreSQL, the Go API, the
+# SSH-over-WebSocket gateway and Caddy as the TLS terminator).
+#
+# Linux integration (creating Linux users, editing sshd configuration, reading
+# /proc) must be performed by the native host agent, which runs on the host via
+# systemd and communicates over the Unix socket mounted below. Running the API
+# in a container without the agent means SYSTEM_ENABLE_NATIVE must stay false.
+#
+#   cp ../.env.example ../.env && edit ../.env
+#   export POSTGRES_PASSWORD="$(openssl rand -base64 24)"
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#
+name: ssh-manager-panel
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sshmp}
+      POSTGRES_USER: ${POSTGRES_USER:-sshmp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD before starting}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sshmp} -d ${POSTGRES_DB:-sshmp}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [panel]
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ../.env
+    environment:
+      # Inside the compose network the database host is `postgres`.
+      DATABASE_URL: postgres://${POSTGRES_USER:-sshmp}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sshmp}?sslmode=disable
+      APP_HTTP_ADDR: 0.0.0.0:8080
+      WS_LISTEN_ADDR: 0.0.0.0:8081
+      # The container never mutates the host directly; the host agent does.
+      SYSTEM_ENABLE_NATIVE: "false"
+      SSHMP_HOST_AGENT_SOCKET: /run/ssh-manager-panel/host.sock
+    volumes:
+      # Unix socket exposed by the native host agent (optional).
+      - /run/ssh-manager-panel:/run/ssh-manager-panel
+      # Panel state (backups, generated snippets). Shared with the agent.
+      - /var/lib/ssh-manager-panel:/var/lib/ssh-manager-panel
+    networks: [panel]
+    # The API is only reachable through Caddy.
+    expose:
+      - "8080"
+      - "8081"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [api]
+    env_file:
+      - ../.env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [panel]
+
+volumes:
+  postgres-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  panel:
+    driver: bridge

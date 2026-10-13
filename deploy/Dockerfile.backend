@@ -1,0 +1,37 @@
+# Build stage: compile a static Go binary.
+FROM golang:1.26-alpine AS build
+
+WORKDIR /src
+
+# Cache dependencies separately from the source tree.
+COPY backend/go.mod backend/go.sum ./
+RUN go mod download
+
+COPY backend/ ./
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
+
+RUN CGO_ENABLED=0 GOOS=linux go build \
+      -trimpath \
+      -ldflags "-s -w -X github.com/sshmp/ssh-manager-panel/internal/version.Version=${VERSION} -X github.com/sshmp/ssh-manager-panel/internal/version.Commit=${COMMIT} -X github.com/sshmp/ssh-manager-panel/internal/version.Date=${BUILD_DATE}" \
+      -o /out/ssh-manager-panel-server ./cmd/server
+
+# Runtime stage: distroless-ish, no shell tools required by the API.
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates tzdata \
+ && addgroup -g 1100 -S panel \
+ && adduser -u 1100 -S -G panel -h /var/lib/ssh-manager-panel panel \
+ && mkdir -p /var/lib/ssh-manager-panel /run/ssh-manager-panel \
+ && chown -R panel:panel /var/lib/ssh-manager-panel /run/ssh-manager-panel
+
+COPY --from=build /out/ssh-manager-panel-server /usr/local/bin/ssh-manager-panel-server
+
+USER panel
+
+EXPOSE 8080 8081
+
+ENTRYPOINT ["/usr/local/bin/ssh-manager-panel-server"]
+CMD ["serve"]

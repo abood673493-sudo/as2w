@@ -1,0 +1,68 @@
+# SSH Manager Panel - Caddy reverse proxy
+#
+# Caddy terminates TLS with Let's Encrypt and forwards:
+#   * the dashboard + REST API to the Go server on :8080
+#   * the SSH-over-WebSocket gateway on the configured path to :8081
+#
+# Replace the placeholder hostnames via the PANEL_DOMAIN and WS_DOMAIN
+# environment variables (docker compose) or edit them directly.
+#
+# Prerequisites: both hostnames must resolve to this server and ports 80/443
+# must be reachable from the internet before Caddy can issue certificates.
+
+{
+	email {$ACME_EMAIL}
+	# Uncomment while testing to avoid Let's Encrypt rate limits:
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+	admin off
+}
+
+# Dashboard + REST API
+{$PANEL_DOMAIN:localhost} {
+	encode zstd gzip
+
+	# Security headers for the SPA.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# REST API and health endpoints.
+	@api path /api/* /healthz /readyz
+	handle @api {
+		reverse_proxy api:8080 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# Static frontend build (served from the Caddy image; mount the build in
+	# production or point this at a separate web root).
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# SSH over WebSocket / secure WebSocket gateway.
+{$WS_DOMAIN:ws.localhost} {
+	# The gateway upgrades to WebSocket and then speaks raw SSH bytes.
+	@ws path /ssh*
+	handle @ws {
+		reverse_proxy api:8081 {
+			# Long-lived streaming connections need no buffering and no timeouts.
+			flush_interval -1
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+
+	# Anything else on this hostname is not a valid transport endpoint.
+	handle {
+		respond "SSH-over-WebSocket endpoint. Use the configured path." 404
+	}
+}

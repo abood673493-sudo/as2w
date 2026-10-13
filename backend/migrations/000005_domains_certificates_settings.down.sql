@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS notifications;
+DROP TABLE IF EXISTS app_settings;
+DROP TABLE IF EXISTS certificates;
+DROP TABLE IF EXISTS domains;
